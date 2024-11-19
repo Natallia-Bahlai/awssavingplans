@@ -1,0 +1,39 @@
+let
+    EC2Pricing = let
+        Source = Csv.Document(Web.Contents("https://pricing.us-east-1.amazonaws.com/offers/v1.0/aws/AmazonEC2/current/ap-southeast-2/index.csv"),[Delimiter=",", Columns=91, Encoding=1252, QuoteStyle=QuoteStyle.None]),
+        #"Removed Top Rows" = Table.Skip(Source,5),
+        #"Promoted Headers" = Table.PromoteHeaders(#"Removed Top Rows", [PromoteAllScalars=true]),
+        #"Filtered Rows" = Table.SelectRows(#"Promoted Headers", each ([TermType] = "OnDemand") and ([CapacityStatus] = "Used")),
+        #"Changed Type" = Table.TransformColumnTypes(#"Filtered Rows",{{"PricePerUnit", type number}}),
+        #"Removed Other Columns" = Table.SelectColumns(#"Changed Type",{"Instance Type", "PricePerUnit", "SKU", "Tenancy", "Operating System", "Pre Installed S/W", "License Model", "Region Code"})
+    in
+        #"Removed Other Columns",
+    SPPricing = let
+        Source = Table.Combine({
+            Csv.Document(Web.Contents("https://pricing.us-east-1.amazonaws.com/savingsPlan/v1.0/aws/AWSComputeSavingsPlan/20240718195814/ap-southeast-2/index.csv"),[Delimiter=",", Columns=57, Encoding=1252, QuoteStyle=QuoteStyle.None])
+        }),
+        #"Removed Top Rows" = Table.Skip(Source,5),
+        #"Promoted Headers" = Table.PromoteHeaders(#"Removed Top Rows", [PromoteAllScalars=true]),
+        #"Filtered Rows" = Table.SelectRows(#"Promoted Headers", each ([PurchaseOption] = "No Upfront" and [UsageType] = "ComputeSP:1yrNoUpfront")),
+        #"Changed Type" = Table.TransformColumnTypes(#"Filtered Rows",{{"DiscountedRate", type number}}),
+        #"Removed Other Columns" = Table.SelectColumns(#"Changed Type",{"DiscountedRate", "DiscountedSKU"})
+    in
+        #"Removed Other Columns",
+
+    Source = Excel.CurrentWorkbook(){[Name="Table1"]}[Content],
+    #"Changed Type" = Table.TransformColumnTypes(Source,{{"Instance type", type text}, {"Platform", type text}, {"Tenancy", type text}, {"Region", type text}, {"Average coverage", Int64.Type}, {"Reservation covered hours", Int64.Type}, {"On-Demand hours", type number}, {"Total running hours", type number}, {"On-Demand cost", type number}}),
+    #"Added Conditional Column" = Table.AddColumn(#"Changed Type", "Operating System", each if Text.StartsWith([Platform], "Windows") then "Windows" else if [Platform] = "Linux/UNIX" then "Linux" else if [Platform] = "Red Hat Enterprise Linux" then "RHEL" else null),
+    #"Added Conditional Column1" = Table.AddColumn(#"Added Conditional Column", "Pre Installed S/W", each if [Platform] = "Windows with SQL Server Standard" then "SQL Std" else if [Platform] = "Windows with SQL Server Enterprise" then "SQL Ent" else "NA"),
+    #"Merged Queries1" = Table.NestedJoin(#"Added Conditional Column1", {"Instance type", "Tenancy", "Operating System", "Pre Installed S/W", "Region"}, EC2Pricing, {"Instance Type", "Tenancy", "Operating System", "Pre Installed S/W", "Region Code"}, "Added Conditional Column1", JoinKind.Inner),
+    #"Expanded Added Conditional Column1" = Table.ExpandTableColumn(#"Merged Queries1", "Added Conditional Column1", {"PricePerUnit", "SKU", "License Model"}, {"EC2.PricePerUnit", "EC2.SKU", "EC2.License Model"}),
+    #"Merged Queries2" = Table.NestedJoin(#"Expanded Added Conditional Column1", {"EC2.SKU"}, SPPricing, {"DiscountedSKU"}, "ComputeSavingPlans (2)", JoinKind.Inner),
+    #"Expanded ComputeSavingPlans (2)" = Table.ExpandTableColumn(#"Merged Queries2", "ComputeSavingPlans (2)", {"DiscountedRate"}, {"SP.DiscountedRate"}),
+    #"Added Custom" = Table.AddColumn(#"Expanded ComputeSavingPlans (2)", "Saving %", each 1 - [SP.DiscountedRate]/[EC2.PricePerUnit], Percentage.Type),
+    #"Added Custom1" = Table.AddColumn(#"Added Custom", "SP Price", each [SP.DiscountedRate]*[Total running hours]/(Date.DaysInMonth(#date(2024, 6, 1))*24), type number),
+    #"Filtered Rows" = Table.SelectRows(#"Added Custom1", each ([EC2.License Model] = "No License required")),
+    #"Removed Other Columns" = Table.SelectColumns(#"Filtered Rows",{"Instance type", "Platform", "On-Demand hours", "On-Demand cost", "EC2.PricePerUnit", "SP.DiscountedRate", "Saving %", "SP Price"}),
+    #"Grouped Rows" = Table.Group(#"Removed Other Columns", {}, {{"SP Price", each List.Sum([SP Price]), type number}, {"SP.DiscountedRate", each List.Sum([SP.DiscountedRate]), type nullable number}}),
+
+    combined = Table.Combine({#"Removed Other Columns", #"Grouped Rows"})
+in
+    combined
